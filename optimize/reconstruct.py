@@ -24,24 +24,34 @@ recon.py => reconsturction 수행 + adaround 수행
 def get_low_bit_features(module, input_data):
 
     for layer in module.modules():
-        if isinstance(layer, (QuantizedBlock)):
-            layer.set_bit(2)
+        if isinstance(layer, (QuantizedLayer,QuantizedBlock)):
+            layer.set_activation_quantization_bit(2)
     return module(input_data)
 
 
 def get_middle_bit_features(module, input_data):
 
     for layer in module.modules():
-        if isinstance(layer, (QuantizedBlock)):
-            layer.set_bit(4)
+        if isinstance(layer, (QuantizedLayer, QuantizedBlock)):
+            layer.set_activation_quantization_bit(4)
     return module(input_data)
 
 def get_high_bit_features(module, input_data):
 
     for layer in module.modules():
-        if isinstance(layer, (QuantizedBlock)):
-            layer.set_bit(6)
+        if isinstance(layer, (QuantizedLayer, QuantizedBlock)):
+            layer.set_activation_quantization_bit(6)
     return module(input_data)
+
+
+def get_fp_features(module, input_data):
+    # 32비트 feature map을 생성하는 함수 (양자화되지 않은 상태)
+    for layer in module.modules():
+        if isinstance(layer, (QuantizedLayer, QuantizedBlock)):
+            layer.set_activation_quantization_bit(32)  # 32비트로 처리하는 대신 그냥 양자화 비트를 설정하지 않으면 됨
+    return module(input_data)
+
+
 
      
 def multi_bit_mix(f_l,f_m, f_h, fp_features, p=0.5 ):
@@ -52,6 +62,7 @@ def multi_bit_mix(f_l,f_m, f_h, fp_features, p=0.5 ):
 
     mixed_quant_features = lambda_1 * f_l + lambda_2 * f_m + lambda_3 * f_h
 
+    print(f"f_l shape: {f_l.shape}, f_m shape: {f_m.shape}, f_h shape: {f_h.shape}, fp_features shape: {fp_features.shape}")
 
     # fp_feature와 mixed_quant_feature를 p에 따라 섞기
 
@@ -360,10 +371,11 @@ def reconstruction_with_mfm_gd_loss(model, fp_model, module, fp_module, cali_dat
         f_l = get_low_bit_features(module, cur_inp)
         f_m = get_middle_bit_features(module, cur_inp)
         f_h = get_high_bit_features(module, cur_inp) 
-        
+
+        f_fp = get_fp_features(module,cur_fp_inp)
 
         # MFM을 사용해 혼합된 특징 생성
-        mixed_feature = multi_bit_mix(f_l, f_m, f_h, cur_fp_inp)
+        mixed_feature = multi_bit_mix(f_l, f_m, f_h, f_fp)
 
         # 위에서 뽑은 mixed_feature를 Quantized Block 의 새로운 입력으로 사용 
 
@@ -375,7 +387,7 @@ def reconstruction_with_mfm_gd_loss(model, fp_model, module, fp_module, cali_dat
 
         # 2. 새로운 f_l, f_m, f_h를 사용하여 GD-Loss 계산
 
-        loss = gd_loss(mixed_feature, new_f_h, new_f_m, new_f_l, cur_fp_oup,
+        loss = gd_loss(new_f_h, new_f_m, new_f_l, cur_fp_oup,
                        gamma1=config.quant.recon.gamma1, gamma2=config.quant.recon.gamma2, gamma3=config.quant.recon.gamma3)
         
     # ==========================================================================================================

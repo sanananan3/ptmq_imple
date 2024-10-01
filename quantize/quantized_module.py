@@ -185,6 +185,11 @@ class QuantizedLayer(QuantizedModule): # 단일 레이어를 양자화하는 클
         if self.qoutput:
             x = self.layer_post_act_fake_quantize(x)
         return x
+    
+    def set_activation_quantization_bit(self, bit):
+        "activation quantization bit 수 설정하기"
+        if hasattr(self, 'layer_post_act_fake_quantize'):
+            self.layer_post_act_fake_quantize.set_bit(bit)
 
 
 class QuantizedBlock(QuantizedModule): # 여러 레이어를 양자화하는 블록 클래스 

@@ -173,7 +173,7 @@ def main(config_path):
                     logger.info('begin reconstruction for module:\n{}'.format(str(child_module)))
                     # 각 block 별로 reconstruction 적용하기 
                     # reconstruction(model, fp_model, child_module, getattr(fp_module, name), cali_data, config.quant.recon)
-                    reconstruction_with_mfm_gd_loss(model, fp_model, child_module, getattr(fp_module, name), cali_data, config.quant.recon)
+                    reconstruction_with_mfm_gd_loss(model, fp_model, child_module, getattr(fp_module, name), cali_data, config)
                 else:
                     recon_model(child_module, getattr(fp_module, name))
         # Start reconstruction
