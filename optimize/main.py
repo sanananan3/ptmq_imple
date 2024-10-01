@@ -155,6 +155,7 @@ def main(config_path):
         '양자화 된 모델에 대해서 activation 및 weight quantization 수행, calibration 데이터 이용해서 양자화 parameter 조정'
         st = time.time()
         enable_calibration_woquantization(model, quantizer_type='act_fake_quant')
+        print(f"Cali data shape: {cali_data.shape}")
         model(cali_data[: 256].cuda())
         enable_calibration_woquantization(model, quantizer_type='weight_fake_quant')
         model(cali_data[: 2].cuda())

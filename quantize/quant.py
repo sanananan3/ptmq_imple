@@ -158,6 +158,9 @@ class FixedFakeQuantize(QuantizeBase): # 고정된 양자화 적용 . 채널 또
                 return x_prob # 확률적으로 선택된 값을 반환 
 
         return X
+    
+    def set_bit(self,bit):
+        self.bit = bit
 
 
 class LSQFakeQuantize(QuantizeBase): # 학습 가능한 양자화 (Learned Step Size Quantization)을 구현. 스케일을 학습 할 수 있도록 한다. 
@@ -210,6 +213,13 @@ class LSQFakeQuantize(QuantizeBase): # 학습 가능한 양자화 (Learned Step 
                 x_prob = torch.where(torch.rand_like(X) < self.drop_prob, X, x_orig)
                 return x_prob
         return X
+    
+    def set_bit(self,bit):
+        self.bit = bit
+        
+    def set_quantization_bit(self, bit):
+        """ Set the quantization bit width for the LSQFakeQuantize. """
+        self.set_bit(bit)  # Delegate to the existing set_bit method
 
 
 class LSQPlusFakeQuantize(QuantizeBase): 

@@ -63,6 +63,8 @@ class QConv2d(QuantizedOperator, nn.Conv2d):
         self.weight_fake_quant = WeightQuantizer(w_qconfig)
 
     def forward(self, input): # 가중치를 양자화한 후 conv2d의 기본 연산 수행 
+        print(f"QConvd input shape: {input.shape}")
+        print(f"Expected weight shape: {self.weight.shape}")
         return self._conv_forward(input, self.weight_fake_quant(self.weight), self.bias)
 
 
@@ -160,6 +162,7 @@ def Quantizer(module, config): # 모듈을 양자화하는 함수
         if getattr(module, 'bias', None) is not None:
             qmodule.bias.data = module.bias.data.clone()
         return qmodule # 양자화된 레이어 생성 
+
     return module
 
 

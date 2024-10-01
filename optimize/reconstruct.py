@@ -21,11 +21,22 @@ recon.py => reconsturction 수행 + adaround 수행
     bit_configs  [(2비트 설정, low), (4비트 설정, middle), (6비트 설정, high)]
 """
 
+class ChannelReducer (nn.Module):
+    def __init__(self, in_channels=64, out_channels=3):
+        super(ChannelReducer, self).__init__()
+        self.conv1x1 = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+    def forward(self, x):
+        return self.conv1x1(x)
+    
+channel_reducer = ChannelReducer(in_channels=64, out_channels=3)
+channel_reducer = channel_reducer.cuda()
+
 def get_low_bit_features(module, input_data):
 
     for layer in module.modules():
         if isinstance(layer, (QuantizedLayer,QuantizedBlock)):
-            layer.set_activation_quantization_bit(2)
+            if hasattr(layer, 'set_activation_quantization_bit'):
+                layer.set_activation_quantization_bit(2)
     return module(input_data)
 
 
@@ -33,14 +44,16 @@ def get_middle_bit_features(module, input_data):
 
     for layer in module.modules():
         if isinstance(layer, (QuantizedLayer, QuantizedBlock)):
-            layer.set_activation_quantization_bit(4)
+            if hasattr(layer, 'set_activation_quantization_bit'):
+                layer.set_activation_quantization_bit(4)
     return module(input_data)
 
 def get_high_bit_features(module, input_data):
 
     for layer in module.modules():
         if isinstance(layer, (QuantizedLayer, QuantizedBlock)):
-            layer.set_activation_quantization_bit(6)
+            if hasattr(layer, 'set_activation_quantization_bit'):
+                layer.set_activation_quantization_bit(6)
     return module(input_data)
 
 
@@ -48,12 +61,10 @@ def get_fp_features(module, input_data):
     # 32비트 feature map을 생성하는 함수 (양자화되지 않은 상태)
     for layer in module.modules():
         if isinstance(layer, (QuantizedLayer, QuantizedBlock)):
-            layer.set_activation_quantization_bit(32)  # 32비트로 처리하는 대신 그냥 양자화 비트를 설정하지 않으면 됨
+            if hasattr(layer, 'set_activation_quantization_bit'):
+                layer.set_activation_quantization_bit(32)
     return module(input_data)
 
-
-
-     
 def multi_bit_mix(f_l,f_m, f_h, fp_features, p=0.5 ):
 
 
@@ -64,7 +75,10 @@ def multi_bit_mix(f_l,f_m, f_h, fp_features, p=0.5 ):
 
     print(f"f_l shape: {f_l.shape}, f_m shape: {f_m.shape}, f_h shape: {f_h.shape}, fp_features shape: {fp_features.shape}")
 
+    mixed_quant_features = channel_reducer(mixed_quant_features)
     # fp_feature와 mixed_quant_feature를 p에 따라 섞기
+    
+    print(f"Mixed_quant_features: 과연 3채널로 reduce 되었는가...: {mixed_quant_features.shape}")
 
     if torch.rand(1).item() < p :
         return mixed_quant_features
@@ -72,7 +86,7 @@ def multi_bit_mix(f_l,f_m, f_h, fp_features, p=0.5 ):
         return (1-p) * mixed_quant_features + p * fp_features
 
 
-def gd_loss(mixed_feature, f_h, f_m, f_l, f_fp, gamma1, gamma2, gamma3):
+def gd_loss(f_h, f_m, f_l, f_fp, gamma1, gamma2, gamma3):
 
     """ gd-loss를 계산하여 고비트 특징이 중-저 비트 특징을 감독하고 add oper 수행
     => fp f 가 한번 더 supervise """
@@ -86,6 +100,8 @@ def gd_loss(mixed_feature, f_h, f_m, f_l, f_fp, gamma1, gamma2, gamma3):
     # add 
 
     combined_feature = f_h + f_m + f_l
+    combined_feature = channel_reducer(combined_feature)
+
 
     # fp 와의 mse 계산 
 
@@ -369,28 +385,68 @@ def reconstruction_with_mfm_gd_loss(model, fp_model, module, fp_module, cali_dat
         # 구현 과제 ... LOW _ MID _ HIGH BIT FEATURE 를 어떻게 뽑아야 좋을까??? 각 함수 다 만드러야 댐 
         
         f_l = get_low_bit_features(module, cur_inp)
+        print(f"Low-bit feature shape: {f_l.shape}")
         f_m = get_middle_bit_features(module, cur_inp)
+        print(f"Middle-bit feature shape: {f_m.shape}")
         f_h = get_high_bit_features(module, cur_inp) 
+        print(f"High-bit feature shape: {f_h.shape}")
+
+        f_l = torch.nn.functional.interpolate(f_l, size=(112, 112), mode='bilinear', align_corners=False)
+        f_m = torch.nn.functional.interpolate(f_m, size=(112, 112), mode='bilinear', align_corners=False)
+        f_h = torch.nn.functional.interpolate(f_h, size=(112, 112), mode='bilinear', align_corners=False)
+
+
 
         f_fp = get_fp_features(module,cur_fp_inp)
 
+        f_fp = channel_reducer(f_fp)
+        f_fp = torch.nn.functional.interpolate(f_fp, size=(112, 112), mode='bilinear', align_corners=False)
+
+
+
         # MFM을 사용해 혼합된 특징 생성
         mixed_feature = multi_bit_mix(f_l, f_m, f_h, f_fp)
-
+        print(f"Mixed feature shape: {mixed_feature.shape}")
         # 위에서 뽑은 mixed_feature를 Quantized Block 의 새로운 입력으로 사용 
 
         new_f_l = get_low_bit_features(module, mixed_feature)
+        new_f_l = channel_reducer(new_f_l)
         new_f_m = get_middle_bit_features(module, mixed_feature)
+        new_f_m = channel_reducer(new_f_m)
         new_f_h = get_high_bit_features(module, mixed_feature)
+        new_f_h = channel_reducer(new_f_h)
 
+        
+        new_f_l = torch.nn.functional.interpolate(f_l, size=(112, 112), mode='bilinear', align_corners=False)
+        new_f_m = torch.nn.functional.interpolate(f_m, size=(112, 112), mode='bilinear', align_corners=False)
+        new_f_h = torch.nn.functional.interpolate(f_h, size=(112, 112), mode='bilinear', align_corners=False)
+
+        # 일단은 그냥 fp 로 가보자... 
         # GD-Loss 계산 => 여기에서 위의 mfm 에서 구한 mixed_feature를 input으로써 gd-loss 에 넣어줘야 한다. 추가하기 ... 차후에!!! input으로 넣어주고 거기에서 high,m,low bit feature 뽑기 
 
-        # 2. 새로운 f_l, f_m, f_h를 사용하여 GD-Loss 계산
+        # 2. 새로운 f_l, f_m, f_h를 사용하여 GD-Loss 계산(reconsturction loss)
 
-        loss = gd_loss(new_f_h, new_f_m, new_f_l, cur_fp_oup,
+        rec_loss = gd_loss(new_f_h, new_f_m, new_f_l, f_fp,
                        gamma1=config.quant.recon.gamma1, gamma2=config.quant.recon.gamma2, gamma3=config.quant.recon.gamma3)
         
     # ==========================================================================================================
+
+        loss_func = LossFunction(module=module, weight=config.quant.recon.weight, iters=config.quant.recon.iters, b_range=config.quant.recon.b_range,
+                             warm_up=config.quant.recon.warm_up)
+        
+        # 여기서부터 rounding loss 
+
+        round_loss = 0
+        for name, layer in module.named_modules():
+            if isinstance(layer, (nn.Linear, nn.Conv2d)):
+                round_vals = layer.weight_fake_quant.rectified_sigmoid()
+                
+                # Compute b using temp_decay logic
+                b = loss_func.temp_decay(i)  # i is the current iteration
+
+                round_loss += config.quant.recon.weight * (1 - ((round_vals - .5).abs() * 2).pow(b)).sum()
+
+        loss = rec_loss + round_loss
 
         if a_opt:
             a_opt.zero_grad()

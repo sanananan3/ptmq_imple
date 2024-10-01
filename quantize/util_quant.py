@@ -12,6 +12,8 @@ def round_ste(x: torch.Tensor): #
     양자화 과정에서 반올림 연산이 미분 불가능하므로 학습 중에는 연산을 미분 가능한 형태로 처리하지만 
     back propagation 과정에서는 미분을 무시하게끔 처리  
         """
+    
+    return (x.round()-x).detach() + x 
 
 def fake_quantize_per_tensor_affine(x, scale, zero_point, quant_min, quant_max):
     x_int = round_ste(x / scale) + zero_point # x/scale (정규화) => round_ste (반올림하여 정수값에 가깝게 만듬) => zero point 를 더하기 
