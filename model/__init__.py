@@ -36,22 +36,6 @@ class QuantBasicBlock(QuantizedBlock):
         if self.qoutput:
             out = self.block_post_act_fake_quantize(out)
         return out
-    
-    def set_activation_quantization_bit(self, bit):
-        
-
-        """ 
-         set the bit-width for activation quantizaiton """
-        
-        self.conv1_relu.set_activation_quantization_bit(bit)
-        self.conv2.set_activation_quantization_bit(bit)
-
-        if self.downsample is not None:
-            self.downsample.set_activation_quantization_bit(bit)
-        if self.qoutput:
-            self.block_post_act_fake_quantize.set_quantization_bit(bit)
-
-
 
 
 class QuantBottleneck(QuantizedBlock):
@@ -83,17 +67,6 @@ class QuantBottleneck(QuantizedBlock):
         if self.qoutput:
             out = self.block_post_act_fake_quantize(out)
         return out
-
-    
-    def set_activation_quantization_bit(self, bit):
-        self.conv1_relu.set_activation_quantization_bit(bit)
-        self.conv2_relu.set_activation_quantization_bit(bit)
-        self.conv3.set_activation_quantization_bit(bit)
-
-        if self.downsample is not None:
-                    self.downsample.set_activation_quantization_bit(bit)
-        if self.qoutput:
-                    self.block_post_act_fake_quantize.set_quantization_bit(bit)
 
 
 specials = {

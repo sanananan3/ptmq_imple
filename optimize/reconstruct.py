@@ -20,53 +20,25 @@ recon.py => reconsturction 수행 + adaround 수행
     우선 각 비트 그룹 별로 tuning된 scaling factor를 적용한 후 feature를 추출하고, 양자화된 모델의 feature와 fp32 모델의 feature 를 섞어주기 
     bit_configs  [(2비트 설정, low), (4비트 설정, middle), (6비트 설정, high)]
 """
+def get_bit_feature(data, bit):
+  
+    qmin = 0
+    qmax = 2 ** bit - 1
+    min_val = data.min().item()
+    max_val = data.max().item()
 
-class ChannelReducer (nn.Module):
-    def __init__(self, in_channels=64, out_channels=3):
-        super(ChannelReducer, self).__init__()
-        self.conv1x1 = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
-    def forward(self, x):
-        return self.conv1x1(x)
-    
-channel_reducer = ChannelReducer(in_channels=64, out_channels=3)
-channel_reducer = channel_reducer.cuda()
-
-def get_low_bit_features(module, input_data):
-
-    for layer in module.modules():
-        if isinstance(layer, (QuantizedLayer,QuantizedBlock)):
-            if hasattr(layer, 'set_activation_quantization_bit'):
-                layer.set_activation_quantization_bit(2)
-    return module(input_data)
-
-
-def get_middle_bit_features(module, input_data):
-
-    for layer in module.modules():
-        if isinstance(layer, (QuantizedLayer, QuantizedBlock)):
-            if hasattr(layer, 'set_activation_quantization_bit'):
-                layer.set_activation_quantization_bit(4)
-    return module(input_data)
-
-def get_high_bit_features(module, input_data):
-
-    for layer in module.modules():
-        if isinstance(layer, (QuantizedLayer, QuantizedBlock)):
-            if hasattr(layer, 'set_activation_quantization_bit'):
-                layer.set_activation_quantization_bit(6)
-    return module(input_data)
-
-
-def get_fp_features(module, input_data):
-    # 32비트 feature map을 생성하는 함수 (양자화되지 않은 상태)
-    for layer in module.modules():
-        if isinstance(layer, (QuantizedLayer, QuantizedBlock)):
-            if hasattr(layer, 'set_activation_quantization_bit'):
-                layer.set_activation_quantization_bit(32)
-    return module(input_data)
+    if max_val == min_val:
+        scale = 1.0
+    else:
+        scale = (max_val - min_val) / (qmax - qmin)
+    zero_point = qmin - min_val / scale
+    zero_point = int(round(zero_point))
+    quantized_data = ((data / scale).round() + zero_point).clamp(qmin, qmax)
+    dequantized_data = (quantized_data - zero_point) * scale
+    return dequantized_data
+ 
 
 def multi_bit_mix(f_l,f_m, f_h, fp_features, p=0.5 ):
-
 
     # mix weight 설정 (일단은 균등하게...  )
     lambda_1, lambda_2, lambda_3 = 1/3, 1/3, 1/3
@@ -75,10 +47,7 @@ def multi_bit_mix(f_l,f_m, f_h, fp_features, p=0.5 ):
 
     print(f"f_l shape: {f_l.shape}, f_m shape: {f_m.shape}, f_h shape: {f_h.shape}, fp_features shape: {fp_features.shape}")
 
-    mixed_quant_features = channel_reducer(mixed_quant_features)
     # fp_feature와 mixed_quant_feature를 p에 따라 섞기
-    
-    print(f"Mixed_quant_features: 과연 3채널로 reduce 되었는가...: {mixed_quant_features.shape}")
 
     if torch.rand(1).item() < p :
         return mixed_quant_features
@@ -100,7 +69,6 @@ def gd_loss(f_h, f_m, f_l, f_fp, gamma1, gamma2, gamma3):
     # add 
 
     combined_feature = f_h + f_m + f_l
-    combined_feature = channel_reducer(combined_feature)
 
 
     # fp 와의 mse 계산 
@@ -248,87 +216,6 @@ def lp_loss(pred, tgt, p=2.0):
     return (pred - tgt).abs().pow(p).sum(1).mean()
 
 
-
-'''
-reconstruction 함수 => 양자화된 모델과 원본 모델을 reconsturciton 하는 과정
-입출력을 비교하고 양자화 오차를 줄이기 위한 학습을 진행한다. 
-'''
-
-def reconstruction(model, fp_model, module, fp_module, cali_data, config):
-    device = next(module.parameters()).device
-    # get data first
-    quant_inp, _ = save_inp_oup_data(model, module, cali_data, store_inp=True, store_oup=False, bs=config.batch_size, keep_gpu=config.keep_gpu)
-    fp_inp, fp_oup = save_inp_oup_data(fp_model, fp_module, cali_data, store_inp=True, store_oup=True, bs=config.batch_size, keep_gpu=config.keep_gpu)
-
-    # prepare for up or down tuning
-    w_para, a_para = [], []
-
-    for name, layer in module.named_modules():
-        if isinstance(layer, (nn.Linear, nn.Conv2d)):
-            weight_quantizer = layer.weight_fake_quant
-            weight_quantizer.init(layer.weight.data, config.round_mode)
-            w_para += [weight_quantizer.alpha]
-        if isinstance(layer, QuantizeBase) and 'post_act_fake_quantize' in name:
-            layer.drop_prob = config.drop_prob
-            if isinstance(layer, LSQFakeQuantize):
-                a_para += [layer.scale]
-            if isinstance(layer, LSQPlusFakeQuantize):
-                a_para += [layer.scale]
-                a_para += [layer.zero_point]
-    if len(a_para) != 0:
-        a_opt = torch.optim.Adam(a_para, lr=config.scale_lr) # adam 옵티마이저 사용
-         
-         # learning rate를 조정하는 역할 / 학습 과정이 진행되면서 학습률을 변화시켜 효율적인 학습이 이루어지도록 한다. 
-         # CosineAnneaingLR : 코사인 곡선 형태로 학습률을 조정한다. 
-         # => 초기에는 높은 학습률로 빠르게 최적화하면서 , 큰 변화를 반영한다. 
-         # => 후반에는 낮은 학습률로 천천히 미세 조정하여 오차가 크게 줄어들지 않도록 한다. 
-         # ETA min 값으로 설정된 최저 학습률로 수렴하면서 학습을 안정적으로 마무리한다 
-
-        a_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(a_opt, T_max=config.iters, eta_min=0.)
-    else:
-        a_opt, a_scheduler = None, None
-    w_opt = torch.optim.Adam(w_para) # adam 옵티마이저 사용 
-    loss_func = LossFunction(module=module, weight=config.weight, iters=config.iters, b_range=config.b_range,
-                             warm_up=config.warm_up)
-
-    sz = quant_inp.size(0) # 입력 데이터셋에서 배치 단위로 추출할 수 있는 전체 데이터 크기를 sz에 저장한다. 
-
-    for i in range(config.iters): # 입력 데이터를 무작위로 추출하여 양자화된 입력 (quant_inp)과 원본 모델의 입력 (fp_inp)을 섞어 사용한다. 
-        idx = torch.randint(0, sz, (config.batch_size,))
-        
-        # 원본 데이터를 섞어서 사용하면 원본 모델의 특성을 유지하면서 양자화된 모델을 재구성할 수 있음 
-
-        if config.drop_prob < 1.0: # drop 확률이 1 미만일 경우 양자화된 입력 + 원본 입력을 섞어서 사용
-            cur_quant_inp = quant_inp[idx].to(device)
-            cur_fp_inp = fp_inp[idx].to(device)
-            cur_inp = torch.where(torch.rand_like(cur_quant_inp) < config.drop_prob, cur_quant_inp, cur_fp_inp)
-        else: # drop 확률이 1이면 모든 데이터를 양자화된 입력만으로 사용 
-            cur_inp = quant_inp[idx].to(device) 
-        cur_fp_oup = fp_oup[idx].to(device)
-
-
-        if a_opt:
-            a_opt.zero_grad()
-        w_opt.zero_grad()
-        cur_quant_oup = module(cur_inp)
-        err = loss_func(cur_quant_oup, cur_fp_oup)
-        err.backward()
-        w_opt.step()
-        if a_opt:
-            a_opt.step()
-            a_scheduler.step()
-
-
-    torch.cuda.empty_cache() # 메모리 비우기
-    for name, layer in module.named_modules(): 
-        if isinstance(layer, (nn.Linear, nn.Conv2d)):
-            weight_quantizer = layer.weight_fake_quant
-            layer.weight.data = weight_quantizer.get_hard_value(layer.weight.data) # 양자화된 레이어의 가중치를 get_hard_value를 통해 정수로 고정한다. 
-            weight_quantizer.adaround = False # adaround를 비활하여 weight 의 반올림을 최종화한다. 
-        if isinstance(layer, QuantizeBase) and 'post_act_fake_quantize' in name:
-            layer.drop_prob = 1.0
-
-
 """ mfm 과 gd_loss 를 고려한 reconstruction 함수 """
 
 
@@ -383,44 +270,27 @@ def reconstruction_with_mfm_gd_loss(model, fp_model, module, fp_module, cali_dat
         # block => high, mid, low 각각 quantize를 해서 feature를 뽑는다. 
 
         # 구현 과제 ... LOW _ MID _ HIGH BIT FEATURE 를 어떻게 뽑아야 좋을까??? 각 함수 다 만드러야 댐 
-        
-        f_l = get_low_bit_features(module, cur_inp)
-        print(f"Low-bit feature shape: {f_l.shape}")
-        f_m = get_middle_bit_features(module, cur_inp)
-        print(f"Middle-bit feature shape: {f_m.shape}")
-        f_h = get_high_bit_features(module, cur_inp) 
-        print(f"High-bit feature shape: {f_h.shape}")
+    # Generate quantized features at different bit widths
 
-        f_l = torch.nn.functional.interpolate(f_l, size=(112, 112), mode='bilinear', align_corners=False)
-        f_m = torch.nn.functional.interpolate(f_m, size=(112, 112), mode='bilinear', align_corners=False)
-        f_h = torch.nn.functional.interpolate(f_h, size=(112, 112), mode='bilinear', align_corners=False)
-
-
-
-        f_fp = get_fp_features(module,cur_fp_inp)
-
-        f_fp = channel_reducer(f_fp)
-        f_fp = torch.nn.functional.interpolate(f_fp, size=(112, 112), mode='bilinear', align_corners=False)
+        f_l = get_bit_feature(cur_fp_oup, bit=2)
+        f_m = get_bit_feature(cur_fp_oup, bit=4)
+        f_h = get_bit_feature(cur_fp_oup, bit=6)
+        f_fp = cur_fp_oup  # quantized 되지 않은 block의 output이 32비트 feature map 
 
 
 
         # MFM을 사용해 혼합된 특징 생성
         mixed_feature = multi_bit_mix(f_l, f_m, f_h, f_fp)
         print(f"Mixed feature shape: {mixed_feature.shape}")
+
         # 위에서 뽑은 mixed_feature를 Quantized Block 의 새로운 입력으로 사용 
 
-        new_f_l = get_low_bit_features(module, mixed_feature)
-        new_f_l = channel_reducer(new_f_l)
-        new_f_m = get_middle_bit_features(module, mixed_feature)
-        new_f_m = channel_reducer(new_f_m)
-        new_f_h = get_high_bit_features(module, mixed_feature)
-        new_f_h = channel_reducer(new_f_h)
+        new_f_l = get_bit_feature(mixed_feature, bit=2)
 
+        new_f_m = get_bit_feature(mixed_feature, bit=4)
+      
+        new_f_h = get_bit_feature(mixed_feature, bit=6)
         
-        new_f_l = torch.nn.functional.interpolate(f_l, size=(112, 112), mode='bilinear', align_corners=False)
-        new_f_m = torch.nn.functional.interpolate(f_m, size=(112, 112), mode='bilinear', align_corners=False)
-        new_f_h = torch.nn.functional.interpolate(f_h, size=(112, 112), mode='bilinear', align_corners=False)
-
         # 일단은 그냥 fp 로 가보자... 
         # GD-Loss 계산 => 여기에서 위의 mfm 에서 구한 mixed_feature를 input으로써 gd-loss 에 넣어줘야 한다. 추가하기 ... 차후에!!! input으로 넣어주고 거기에서 high,m,low bit feature 뽑기 
 
