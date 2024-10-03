@@ -317,6 +317,7 @@ def reconstruction_with_mfm_gd_loss(model, fp_model, module, fp_module, cali_dat
                 round_loss += config.quant.recon.weight * (1 - ((round_vals - .5).abs() * 2).pow(b)).sum()
 
         loss = rec_loss + round_loss
+        print("loss 값: ", loss)
 
         if a_opt:
             a_opt.zero_grad()
